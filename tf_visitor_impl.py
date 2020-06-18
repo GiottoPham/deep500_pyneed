@@ -3,22 +3,18 @@ from functools import partial
 
 import numpy as np
 import tensorflow.compat.v1 as tf
-tf.compat.v1.disable_v2_behavior()
-from tf_network import TensorflowNetwork
+tf.disable_v2_behavior()
+from .tf_network import TensorflowNetwork
 import deep500 as d5
-
-
 class TensorflowVisitor(d5.OnnxBaseVisitor):
 
     def __init__(self):
         self.counter = 0
         self.net_input = {}
-        self.is_training = None
 
     def visit_graph(self, graph: d5.ops.OnnxGraph, network: TensorflowNetwork):
         self.net_input.clear()
         tf.reset_default_graph()
-        self.is_training = tf.placeholder(tf.bool)
 
     def visit_net_input(self, input: d5.ops.OnnxValueInfo, network: TensorflowNetwork):
         if isinstance(input.type, d5.ops.OnnxTensorType):
@@ -54,7 +50,7 @@ class TensorflowVisitor(d5.OnnxBaseVisitor):
     def visit_dropout(self, op: d5.ops.Dropout, network: TensorflowNetwork):
         X = network.fetch_internal_tensor(op.i_data)
         ratio = op.ratio.get_value() if op.ratio else 0.5
-        Y = tf.layers.dropout(X, rate=ratio, training=self.is_training)
+        Y = tf.nn.dropout(X, ratio)
         network.feed_internal_tensor(op.o_output, Y)
 
     def visit_sub(self, op: d5.ops.Sub, network: TensorflowNetwork):
@@ -322,26 +318,26 @@ class TensorflowVisitor(d5.OnnxBaseVisitor):
         labels = tf.placeholder(tf.int32, name=op.i_target)
         network.feed_internal_tensor(op.i_target, labels)
 
-        X = network.fetch_internal_tensor(op.i_X)
-        L = -tf.reduce_sum(labels * tf.log(X), 1)
+        softmax = network.fetch_internal_tensor(op.i_X)
+        # Tensorflow recommends to use tf_backed.nn.softmax_cross_entropy_with_logits()
+        # but since we only get softmax we have to apply the slow way here
+        L = -tf.reduce_sum(labels * tf.log(softmax), 1)
         L = tf.reduce_mean(L, axis=0)
         network.loss_gradient = L
         network.feed_internal_tensor(op.o_output, L)
         network.add_output(op.o_output)
 
-    def visit_softmax_cross_entropy(self, op: d5.ops.SoftmaxCrossEntropy, network: TensorflowNetwork):
-        X = network.fetch_internal_tensor(op.i_X)
+    def visit_label_cross_entropy(self, op: d5.ops.LabelCrossEntropy, network: TensorflowNetwork):
+        softmax = network.fetch_internal_tensor(op.i_X)
 
         labels = tf.placeholder(tf.int32, name=op.i_target)
         network.feed_internal_tensor(op.i_target, labels)
 
-        labels = tf.one_hot(labels, X.get_shape().as_list()[-1])
-        result = tf.nn.softmax_cross_entropy_with_logits_v2(
-            labels,
-            X,
-            axis=None  # Defaults to -1
-        )
-        L = tf.reduce_mean(result, axis=0)
+        labels = tf.one_hot(labels, softmax.get_shape().as_list()[1])
+        # Tensorflow recommends to use tf_backed.nn.softmax_cross_entropy_with_logits()
+        # but since we only get softmax we have to apply the slow way here
+        L = -tf.reduce_sum(labels * tf.log(softmax), 1)
+        L = tf.reduce_mean(L, axis=0)
         network.loss_gradient = L
         network.feed_internal_tensor(op.o_output, L)
         network.add_output(op.o_output)
@@ -492,23 +488,6 @@ class TensorflowVisitor(d5.OnnxBaseVisitor):
                       pads=pads,
                       count_include_pad=op.count_include_pad,
                       auto_pad=auto_pad)
-        network.feed_internal_tensor(op.o_Y, Y)
-
-    def visit_globalaveragepool(self, op: d5.ops.GlobalAveragePool, network: TensorflowNetwork):
-        X = network.fetch_internal_tensor(op.i_X)
-
-        modtyp = getattr(tf.keras.layers,
-                         'GlobalAveragePooling%dD' % (len(X.shape) - 2), None)
-        if modtyp is None:
-            raise RuntimeError('Unsupported dimensions for global average pool'
-                               '(%d)' % (len(X.shape) - 2))
-
-        # ONNX forces channels_first format
-        tfop = modtyp(data_format='channels_first')
-
-        # Spatial mean w.r.t. channel dimensions
-        Y = tfop.apply(X)
-
         network.feed_internal_tensor(op.o_Y, Y)
 
     def visit_conv(self, op: d5.ops.Conv, network: TensorflowNetwork):
@@ -956,26 +935,28 @@ class TensorflowVisitor(d5.OnnxBaseVisitor):
         return pooled
 
     def visit_batchnormalization(self, op: d5.ops.BatchNormalization, network: TensorflowNetwork):
-        X, B, scale, r_mean, r_var = network.fetch_internal_tensors([
-            op.i_X, op.i_B, op.i_scale, op.i_mean, op.i_var])
+        X, B, scale, r_mean, r_var = network.fetch_internal_tensors([op.i_X, op.i_B, op.i_scale, op.i_mean, op.i_var])
+        X_shape = X.get_shape().as_list()
+        X_rank = len(X_shape)
+        params_shape_broadcast = list([1, X_shape[1]] + [1 for _ in range(2, X_rank)])
+        total_num_dim = len(X.get_shape())
+        scale = tf.reshape(scale, params_shape_broadcast)
+        bias = tf.reshape(B, params_shape_broadcast)
+        r_mean = tf.reshape(r_mean, params_shape_broadcast)
+        r_var = tf.reshape(r_var, params_shape_broadcast)
 
-        momentum = 0.9 if op.momentum is None else op.momentum.get_value()
-        epsilon = op.epsilon.get_value() if op.epsilon else 1e-5
+        if False:  # not self.is_test:
+            Y = tf.nn.batch_normalization(X, r_mean, r_var, bias, scale, 1e-5)
+        else:
+            spatial = (1 if op.spatial is None else op.spatial.get_value()) == 1
+            momentum = 0.9 if op.momentum is None else op.momentum.get_value()
+            axis = [0] if spatial else [0] + list(range(2, total_num_dim))
+            mean, variance = tf.nn.moments(X, axis)
+            r_mean = r_mean * momentum + mean * (1 - momentum)
+            r_var = r_var * momentum + variance * (1 - momentum)
 
-        # Axis is fixed to 1 since ONNX forces the NCHW data layout.
-        tfop = tf.layers.BatchNormalization(axis=1, momentum=momentum,
-                                            epsilon=epsilon)
-        Y = tfop.apply(X, training=self.is_training)
-
-        # Add network initializers for running mean, variance, and gamma/beta
-        network.initializers[tfop.gamma] = op.i_scale
-        if op.i_B is not None:
-            network.initializers[tfop.beta] = op.i_B
-        network.initializers[tfop.moving_mean] = op.i_mean
-        network.initializers[tfop.moving_variance] = op.i_var
-
-        network.feed_internal_tensor(op.o_Y, Y)
-
+            Y = tf.nn.batch_normalization(X, r_mean, r_var, bias, scale, 1e-5)
+            network.feed_internal_tensor(op.o_Y, Y)
 
     PAD_TF_INCOMPATIBLE = "PAD_TF_INCOMPATIBLE"
 
@@ -1148,4 +1129,5 @@ class TensorflowVisitor(d5.OnnxBaseVisitor):
 
     def supports_device(self, device_name):
         return False
-
+        
+        
