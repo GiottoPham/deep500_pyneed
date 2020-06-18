@@ -4,7 +4,7 @@ import deep500 as d5
 
 
 import tensorflow.compat.v1 as tf
-tf.compat.v1.disable_v2_behavior()
+tf.disable_v2_behavior()
 
 
 class TensorflowNetwork(d5.Network):
@@ -41,8 +41,6 @@ class TensorflowNetwork(d5.Network):
             else tf.ConfigProto(device_count={'GPU': 0}, **tf_args)
         if self.device_option.is_gpu():
             self.session_config.gpu_options.visible_device_list = str(self.device_option.num)
-
-        self.initializers = {}
 
     def _teardown(self):
         self.session.close()
@@ -148,8 +146,6 @@ class TensorflowNetwork(d5.Network):
         self.tensors[name] = tensor
 
     def fetch_internal_tensor(self, name):
-        if isinstance(name, (tf.Tensor, tf.Operation)):
-            return name
         return self.tensors.get(name) if name in self.tensors else self.variables[name]
 
     def fetch_internal_tensors(self, names):
@@ -157,7 +153,7 @@ class TensorflowNetwork(d5.Network):
         
     def get_input_nodes(self) -> List[str]:
         graph = tf.get_default_graph()
-        return [n.name + ':0' for n in graph.as_graph_def().node if len(n.input) == 0 and n.op == 'Placeholder']
+        return [n.name for n in graph.as_graph_def().node if len(n.input) == 0 and n.op == 'Placeholder']
 
     def get_output_nodes(self) -> List[str]:
         return self.output_names
