@@ -3,8 +3,8 @@ from typing import Dict, List
 import numpy as np
 
 import deep500 as d5
-from .tf_network import TensorflowNetwork
-from .tf_visitor_impl import TensorflowVisitor
+from tf_network import TensorflowNetwork
+from tf_visitor_impl import TensorflowVisitor
 
 import tensorflow.compat.v1 as tf
 tf.compat.v1.disable_v2_behavior()
