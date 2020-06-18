@@ -3,9 +3,12 @@ from typing import Dict, List
 import numpy as np
 
 import deep500 as d5
+from .tf_network import TensorflowNetwork
+from .tf_visitor_impl import TensorflowVisitor
 
 import tensorflow.compat.v1 as tf
-tf.compat.v1.disable_v2_behavior()        
+tf.compat.v1.disable_v2_behavior()
+
 class TensorflowGraphExecutor(d5.GraphExecutor):
     def __init__(self, model: d5.ops.OnnxModel, device: d5.DeviceType,
                  events: List[d5.ExecutorEvent] = None):
