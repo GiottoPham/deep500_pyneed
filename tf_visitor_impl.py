@@ -4,7 +4,7 @@ from functools import partial
 import numpy as np
 import tensorflow.compat.v1 as tf
 tf.compat.v1.disable_v2_behavior()
-
+from .tf_network import TensorflowNetwork
 import deep500 as d5
 
 
